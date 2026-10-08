@@ -1,0 +1,50 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+@layer base {
+  body {
+    @apply bg-[#0b0e14] text-slate-100;
+    font-family: 'Inter', -apple-system, BlinkMacSystemFont, sans-serif;
+  }
+  
+  code, pre {
+    font-family: 'JetBrains Mono', monospace;
+  }
+}
+
+/* Custom scrollbars */
+::-webkit-scrollbar {
+  width: 6px;
+  height: 6px;
+}
+::-webkit-scrollbar-track {
+  background: #0b0e14;
+}
+::-webkit-scrollbar-thumb {
+  background: #1e2638;
+  border-radius: 3px;
+}
+::-webkit-scrollbar-thumb:hover {
+  background: #2a364f;
+}
+
+/* Wallet adapter modal tweaks */
+.wallet-adapter-button {
+  font-family: 'Inter', sans-serif !important;
+  background-color: #0284c7 !important;
+  border-radius: 0.5rem !important;
+  height: 40px !important;
+  padding: 0 16px !important;
+  font-weight: 600 !important;
+  font-size: 14px !important;
+  transition: all 0.2s ease !important;
+}
+.wallet-adapter-button:hover {
+  background-color: #0369a1 !important;
+}
+.wallet-adapter-modal-wrapper {
+  background: #111827 !important;
+  border: 1px solid #1f2937 !important;
+  border-radius: 1rem !important;
+}

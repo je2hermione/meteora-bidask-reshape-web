@@ -1,0 +1,317 @@
+import { Connection, PublicKey, Transaction } from "@solana/web3.js";
+import DLMM, {
+  StrategyType,
+  getLiquidityStrategyParameterBuilder,
+  buildLiquidityStrategyParameters,
+} from "@meteora-ag/dlmm";
+import BN from "bn.js";
+import { PoolInfo, LPPosition, ReshapeConfig, UserPoolPosition } from "../types";
+import { getBinPrice } from "./math";
+
+// Reliable Solana RPC endpoints
+export const DEFAULT_RPC_ENDPOINTS = [
+  "https://api.mainnet-beta.solana.com",
+];
+
+export const DEFAULT_RPC_ENDPOINT = "https://api.mainnet-beta.solana.com";
+
+// Popular Meteora DLMM pool for default view
+export const DEFAULT_POOL_ADDRESS = "FtiotJckV2ZG4S1YgJDJLiXKKDAnKWXgQxo7vxsjPwPe";
+
+/**
+ * Loads metadata from DexScreener to get real token names & symbols
+ */
+async function fetchTokenMetadata(poolAddressStr: string) {
+  try {
+    const res = await fetch(`https://api.dexscreener.com/latest/dex/pairs/solana/${poolAddressStr}`, {
+      signal: AbortSignal.timeout(3500),
+    });
+    if (res.ok) {
+      const data = await res.json();
+      const pair = data.pair || (data.pairs && data.pairs[0]);
+      if (pair) {
+        return {
+          baseSymbol: pair.baseToken.symbol,
+          quoteSymbol: pair.quoteToken.symbol,
+          priceUsd: Number(pair.priceUsd || 0),
+        };
+      }
+    }
+  } catch (e) {
+    // ignore
+  }
+  return null;
+}
+
+/**
+ * Loads DLMM pool metadata
+ */
+export async function fetchPoolInfo(
+  connection: Connection,
+  poolAddressStr: string
+): Promise<{ pool: DLMM; info: PoolInfo }> {
+  const poolPubkey = new PublicKey(poolAddressStr);
+  const pool = await DLMM.create(connection, poolPubkey);
+  const activeBin = await pool.getActiveBin();
+
+  const tokenXDecimals = pool.tokenX.mint.decimals;
+  const tokenYDecimals = pool.tokenY.mint.decimals;
+  const currentPrice = getBinPrice(
+    activeBin.binId,
+    pool.lbPair.binStep,
+    tokenXDecimals,
+    tokenYDecimals
+  );
+
+  const dexMeta = await fetchTokenMetadata(poolAddressStr);
+
+  const tokenXSymbol = dexMeta?.baseSymbol || (pool.tokenX.mint.address.toBase58() === "So11111111111111111111111111111111111111112" ? "SOL" : "Token X");
+  const tokenYSymbol = dexMeta?.quoteSymbol || (pool.tokenY.mint.address.toBase58() === "EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v" ? "USDC" : pool.tokenY.mint.address.toBase58() === "So11111111111111111111111111111111111111112" ? "SOL" : "Token Y");
+
+  // Fetch real on-chain market liquidity distribution around active bin (+- 35 bins)
+  let marketBins: { binId: number; price: number; amountX: number; amountY: number }[] = [];
+  try {
+    const binsAround = await pool.getBinsAroundActiveBin(35, 35);
+    marketBins = binsAround.bins.map((b: any) => ({
+      binId: b.binId,
+      price: getBinPrice(b.binId, pool.lbPair.binStep, tokenXDecimals, tokenYDecimals),
+      amountX: Number(b.xAmount.toString()) / Math.pow(10, tokenXDecimals),
+      amountY: Number(b.yAmount.toString()) / Math.pow(10, tokenYDecimals),
+    }));
+  } catch (e) {
+    console.warn("Could not fetch binsAroundActiveBin:", e);
+  }
+
+  const info: PoolInfo = {
+    address: poolAddressStr,
+    tokenX: {
+      mint: pool.tokenX.mint.address.toBase58(),
+      symbol: tokenXSymbol,
+      decimals: tokenXDecimals,
+    },
+    tokenY: {
+      mint: pool.tokenY.mint.address.toBase58(),
+      symbol: tokenYSymbol,
+      decimals: tokenYDecimals,
+    },
+    binStep: pool.lbPair.binStep,
+    activeBinId: activeBin.binId,
+    currentPrice,
+    feeBps: pool.lbPair.parameters.baseFactor * pool.lbPair.binStep / 100,
+    marketBins,
+  };
+
+  return { pool, info };
+}
+
+const KNOWN_TOKENS: Record<string, string> = {
+  "So11111111111111111111111111111111111111112": "SOL",
+  "EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v": "USDC",
+  "Es9vMFrzaCERmJfrF4H2FYD4KCoNkY11McCe8BenwNYB": "USDT",
+  "7KEPApdbBMByrmqihz3bht2uMhFQcatjfSFQCKq66kH3": "DARK",
+  "JUPyiwrYJFskUPiHa7hkeR8VUtAeFoSYbKedZNsDvCN": "JUP",
+  "DezXAZ8z7PnrnRJjz3wXBoRgixCa6xjnB7YaB1pPB263": "BONK",
+  "EKpQGSJtjMFqKZ9KQanSqYXRcF8fBopzLHYxdM65zcjm": "WIF",
+};
+
+export async function scanAllUserPositions(
+  connection: Connection,
+  userWallet: PublicKey
+): Promise<UserPoolPosition[]> {
+  try {
+    const allPositionsMap = await DLMM.getAllLbPairPositionsByUser(connection, userWallet);
+    const results: UserPoolPosition[] = [];
+
+    for (const [poolKeyStr, item] of allPositionsMap.entries()) {
+      const xMint = item.lbPair.tokenXMint.toBase58();
+      const yMint = item.lbPair.tokenYMint.toBase58();
+      const tokenXSymbol = KNOWN_TOKENS[xMint] || `${xMint.slice(0, 4)}..`;
+      const tokenYSymbol = KNOWN_TOKENS[yMint] || (yMint.startsWith("So11") ? "SOL" : `${yMint.slice(0, 4)}..`);
+      const pairName = `${tokenXSymbol}/${tokenYSymbol}`;
+
+      for (const posData of item.lbPairPositionsData || []) {
+        results.push({
+          poolAddress: poolKeyStr,
+          positionPublicKey: posData.publicKey.toBase58(),
+          pairName,
+          tokenXSymbol,
+          tokenYSymbol,
+          lowerBinId: posData.positionData.lowerBinId,
+          upperBinId: posData.positionData.upperBinId,
+          totalXAmount: Number(posData.positionData.totalXAmount || 0),
+          totalYAmount: Number(posData.positionData.totalYAmount || 0),
+        });
+      }
+    }
+    return results;
+  } catch (err) {
+    console.error("scanAllUserPositions error:", err);
+    return [];
+  }
+}
+
+/**
+ * Loads user positions for a pool
+ */
+export async function fetchUserPositions(
+  pool: DLMM,
+  userWallet: PublicKey
+): Promise<LPPosition[]> {
+  const { userPositions } = await pool.getPositionsByUserAndLbPair(userWallet);
+  const activeBin = await pool.getActiveBin();
+  const tokenXDecimals = pool.tokenX.mint.decimals;
+  const tokenYDecimals = pool.tokenY.mint.decimals;
+
+  return userPositions.map((pos) => {
+    const posData = pos.positionData;
+    const lowerPrice = getBinPrice(posData.lowerBinId, pool.lbPair.binStep, tokenXDecimals, tokenYDecimals);
+    const upperPrice = getBinPrice(posData.upperBinId, pool.lbPair.binStep, tokenXDecimals, tokenYDecimals);
+
+    // Extract bin array amounts
+    const bins = (posData.positionBinData || []).map((b: any) => {
+      const bPrice = getBinPrice(b.binId, pool.lbPair.binStep, tokenXDecimals, tokenYDecimals);
+      return {
+        binId: b.binId,
+        price: bPrice,
+        amountX: Number(b.positionXAmount || 0) / Math.pow(10, tokenXDecimals),
+        amountY: Number(b.positionYAmount || 0) / Math.pow(10, tokenYDecimals),
+        liquidityShare: (b.positionLiquidity || "0").toString(),
+        isCurrentBin: b.binId === activeBin.binId,
+      };
+    });
+
+    const totalXAmount = Number(posData.totalXAmount || 0) / Math.pow(10, tokenXDecimals);
+    const totalYAmount = Number(posData.totalYAmount || 0) / Math.pow(10, tokenYDecimals);
+
+    return {
+      publicKey: pos.publicKey.toBase58(),
+      lowerBinId: posData.lowerBinId,
+      upperBinId: posData.upperBinId,
+      lowerPrice,
+      upperPrice,
+      totalXAmount,
+      totalYAmount,
+      bins,
+    };
+  });
+}
+
+/**
+ * Builds atomic rebalance transaction instructions.
+ *
+ * Reshaping means: withdraw 100% of the position's existing liquidity and
+ * re-deposit it over the SAME bin range using a new distribution shape.
+ *
+ * IMPORTANT: `pool.simulateRebalancePosition` expects `RebalanceWithDeposit`
+ * structs shaped as `{ minDeltaId, maxDeltaId, x0, y0, deltaX, deltaY,
+ * favorXInActiveBin }` (all BN) and `RebalanceWithWithdraw` structs shaped as
+ * `{ minBinId, maxBinId, bps }`. Passing the wrong shape is what caused
+ * `Cannot read properties of undefined (reading 'gt')` (the SDK validates
+ * `deposit.minDeltaId.gt(deposit.maxDeltaId)`).
+ */
+export async function buildAtomicReshapeTransactions(
+  pool: DLMM,
+  userWallet: PublicKey,
+  positionPubkey: PublicKey,
+  config: ReshapeConfig
+): Promise<{
+  initBinArrayTx: Transaction | null;
+  rebalanceTx: Transaction;
+}> {
+  const { userPositions } = await pool.getPositionsByUserAndLbPair(userWallet);
+  const positionInfo = userPositions.find((p) => p.publicKey.equals(positionPubkey));
+  if (!positionInfo) throw new Error("Target position not found on-chain");
+
+  const posData = positionInfo.positionData;
+  const activeBinId = pool.lbPair.activeId;
+
+  // ---- 1. Withdraw 100% of the liquidity in the reshape sub-range ----
+  // The reshape operates on the single-sided Token X liquidity above the active
+  // bin (fromBinId..toBinId), leaving the below-active Token Y side untouched.
+  const withdraws = [
+    {
+      minBinId: new BN(config.fromBinId),
+      maxBinId: new BN(config.toBinId),
+      bps: new BN(10_000), // 100%
+    },
+  ];
+
+  // ---- 2. Sum the tokens actually being withdrawn (+ claimable fees) in that range ----
+  let amountX = new BN(0);
+  let amountY = new BN(0);
+  for (const b of posData.positionBinData || []) {
+    if (b.binId < config.fromBinId || b.binId > config.toBinId) continue;
+    amountX = amountX
+      .add(new BN(b.positionXAmount || 0))
+      .add(new BN(b.positionFeeXAmount || 0));
+    amountY = amountY
+      .add(new BN(b.positionYAmount || 0))
+      .add(new BN(b.positionFeeYAmount || 0));
+  }
+
+  // ---- 3. Build the deposit struct exactly as the SDK's own strategy builder does ----
+  // On ask-side (above active price), StrategyType.BidAsk produces x0 = 0 and deltaX > 0,
+  // which is an ascending triangle: minimum near active price and maximum at far boundary.
+  const strategyType =
+    config.distributionType === "spot"
+      ? StrategyType.Spot
+      : StrategyType.BidAsk;
+
+  const minDeltaId = new BN(config.fromBinId - activeBinId);
+  const maxDeltaId = new BN(config.toBinId - activeBinId);
+
+  // Bins strictly below active bin are Token Y (Bid side).
+  // If minDeltaId < 0 and maxDeltaId <= 0, favorXInActiveBin is false.
+  const isBidSideOnly = maxDeltaId.lt(new BN(0));
+  const favorXInActiveBin = !isBidSideOnly && minDeltaId.lte(new BN(0));
+
+  const strategyParameters = buildLiquidityStrategyParameters(
+    amountX,
+    amountY,
+    minDeltaId,
+    maxDeltaId,
+    new BN(pool.lbPair.binStep),
+    favorXInActiveBin,
+    new BN(activeBinId),
+    getLiquidityStrategyParameterBuilder(strategyType)
+  );
+
+  const deposits = [
+    {
+      minDeltaId,
+      maxDeltaId,
+      x0: strategyParameters.x0,
+      y0: strategyParameters.y0,
+      deltaX: strategyParameters.deltaX,
+      deltaY: strategyParameters.deltaY,
+      favorXInActiveBin,
+    },
+  ];
+
+  // ---- 4. Simulate rebalance with the DLMM SDK ----
+  const simResponse = await pool.simulateRebalancePosition(
+    positionPubkey,
+    posData,
+    true, // shouldClaimFee
+    true, // shouldClaimReward
+    deposits,
+    withdraws
+  );
+
+  // ---- 5. Generate transaction instructions ----
+  const { initBinArrayInstructions, rebalancePositionInstruction } =
+    await pool.rebalancePosition(
+      simResponse,
+      new BN(config.maxActiveBinSlippage || 2),
+      userWallet
+    );
+
+  let initBinArrayTx: Transaction | null = null;
+  if (initBinArrayInstructions.length > 0) {
+    initBinArrayTx = new Transaction().add(...initBinArrayInstructions);
+  }
+
+  const rebalanceTx = new Transaction().add(...rebalancePositionInstruction);
+
+  return { initBinArrayTx, rebalanceTx };
+}

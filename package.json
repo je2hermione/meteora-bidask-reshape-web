@@ -1,0 +1,44 @@
+{
+  "name": "meteora-reshape",
+  "private": true,
+  "version": "1.0.0",
+  "type": "module",
+  "description": "Meteora DLMM Liquidity Reshape & Range Manager Web App",
+  "scripts": {
+    "dev": "vite",
+    "build": "vite build",
+    "preview": "vite preview"
+  },
+  "dependencies": {
+    "@coral-xyz/anchor": "^0.31.0",
+    "@meteora-ag/dlmm": "^1.9.8",
+    "@solana/wallet-adapter-base": "^0.9.23",
+    "@solana/wallet-adapter-react": "^0.15.35",
+    "@solana/wallet-adapter-react-ui": "^0.9.35",
+    "@solana/web3.js": "^1.98.0",
+    "bn.js": "^5.2.1",
+    "bs58": "^6.0.0",
+    "clsx": "^2.1.1",
+    "decimal.js": "^10.4.3",
+    "lightweight-charts": "^4.2.1",
+    "lucide-react": "^0.475.0",
+    "react": "^18.3.1",
+    "react-dom": "^18.3.1"
+  },
+  "overrides": {
+    "@solana-mobile/wallet-adapter-mobile": "2.1.4",
+    "@solana-mobile/mobile-wallet-adapter-protocol-web3js": "2.1.4"
+  },
+  "devDependencies": {
+    "@types/bn.js": "^5.1.5",
+    "@types/react": "^18.3.3",
+    "@types/react-dom": "^18.3.0",
+    "@vitejs/plugin-react": "^4.3.1",
+    "autoprefixer": "^10.4.17",
+    "postcss": "^8.4.35",
+    "tailwindcss": "^3.4.1",
+    "typescript": "^5.5.4",
+    "vite": "^5.4.0",
+    "vite-plugin-node-polyfills": "^0.22.0"
+  }
+}

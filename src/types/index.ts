@@ -13,7 +13,6 @@ export interface PoolInfo {
   binStep: number;
   activeBinId: number;
   currentPrice: number;
-  feeBps: number;
   marketBins?: {
     binId: number;
     price: number;
@@ -62,8 +61,6 @@ export interface ReshapeConfig {
   fromBinId: number;
   toBinId: number;
   distributionType: ReshapeDistributionType;
-  minWeight: number;
-  maxWeight: number;
   maxActiveBinSlippage: number;
 }
 
@@ -74,4 +71,6 @@ export interface OHLCVBar {
   low: number;
   close: number;
   volume?: number;
+  /** True when this bar was synthesized locally because OHLCV APIs were unreachable */
+  synthetic?: boolean;
 }

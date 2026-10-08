@@ -15,10 +15,6 @@ interface ReshapePanelProps {
   setDistributionType: (t: ReshapeDistributionType) => void;
   scopeMode: ReshapeScopeMode;
   setScopeMode: (s: ReshapeScopeMode) => void;
-  minWeight: number;
-  setMinWeight: (w: number) => void;
-  maxWeight: number;
-  setMaxWeight: (w: number) => void;
   dlmmInstance: any | null;
   activePosition?: LPPosition | null;
   onReshapeSuccess?: () => void;
@@ -33,10 +29,6 @@ export const ReshapePanel: React.FC<ReshapePanelProps> = ({
   setDistributionType,
   scopeMode,
   setScopeMode,
-  minWeight,
-  setMinWeight,
-  maxWeight,
-  setMaxWeight,
   dlmmInstance,
   activePosition,
   onReshapeSuccess,
@@ -56,7 +48,6 @@ export const ReshapePanel: React.FC<ReshapePanelProps> = ({
   const currentOffset = activeBinId - posLowerBin;
   const isOutOfRangeBelow = activeBinId <= posLowerBin;
   const isOutOfRangeAbove = activeBinId >= posUpperBin;
-  const isAskSideDominant = activeBinId < (posLowerBin + posUpperBin) / 2;
 
   const percentFromBottom = isOutOfRangeBelow
     ? "0.0"
@@ -72,22 +63,27 @@ export const ReshapePanel: React.FC<ReshapePanelProps> = ({
     Number(percentFromBottom) <= 15 ||
     Number(percentFromBottom) >= 85;
 
-  // Determine sub-range slice boundaries
-  let startReshapeBin = posLowerBin;
-  let targetUpperBinId = posUpperBin;
+  // Determine sub-range slice boundaries for a given position range.
+  // A reshape NEVER moves, cuts, or extends the position's [lowerBinId, upperBinId]
+  // boundaries — a slice only selects a sub-range whose distribution gets reshaped.
+  const resolveRange = (lowerBin: number, upperBin: number) => {
+    const outOfRange = activeBinId <= lowerBin || activeBinId >= upperBin;
+    if (outOfRange || scopeMode === "full_range") {
+      return { fromBinId: lowerBin, toBinId: upperBin };
+    }
+    if (scopeMode === "ask_slice") {
+      // Ask slice (Token X / sell orders) from activeBin + 1 to upper limit
+      return { fromBinId: Math.max(lowerBin, activeBinId + 1), toBinId: upperBin };
+    }
+    // bid_slice: Bid slice (Token Y / buy orders) from lower limit to activeBin - 1
+    return { fromBinId: lowerBin, toBinId: Math.min(upperBin, activeBinId - 1) };
+  };
 
-  if (isOutOfRangeBelow || isOutOfRangeAbove || scopeMode === "full_range") {
-    startReshapeBin = posLowerBin;
-    targetUpperBinId = posUpperBin;
-  } else if (scopeMode === "ask_slice") {
-    // Ask slice (Token X / sell orders) from activeBin + 1 to upper limit
-    startReshapeBin = Math.max(posLowerBin, activeBinId + 1);
-    targetUpperBinId = posUpperBin;
-  } else if (scopeMode === "bid_slice") {
-    // Bid slice (Token Y/SOL / buy orders) from lower limit to activeBin - 1
-    startReshapeBin = posLowerBin;
-    targetUpperBinId = Math.min(posUpperBin, activeBinId - 1);
-  }
+  // Display range (may be based on not-yet-loaded state — execution below
+  // always re-resolves from the actual on-chain position bounds).
+  const displayRange = resolveRange(posLowerBin, posUpperBin);
+  const startReshapeBin = displayRange.fromBinId;
+  const targetUpperBinId = displayRange.toBinId;
 
   const affectedBinsCount = Math.max(0, targetUpperBinId - startReshapeBin + 1);
 
@@ -110,11 +106,13 @@ export const ReshapePanel: React.FC<ReshapePanelProps> = ({
       setStatusMessage("Locating target position on-chain...");
 
       let targetPosPubkey: PublicKey;
-      let targetUpperBinId: number;
+      let targetLowerBinId: number;
+      let targetPosUpperBinId: number;
 
       if (activePosition) {
         targetPosPubkey = new PublicKey(activePosition.publicKey);
-        targetUpperBinId = activePosition.upperBinId;
+        targetLowerBinId = activePosition.lowerBinId;
+        targetPosUpperBinId = activePosition.upperBinId;
       } else {
         const userPositions = await dlmmInstance.getPositionsByUserAndLbPair(publicKey);
         if (!userPositions || userPositions.userPositions.length === 0) {
@@ -124,8 +122,14 @@ export const ReshapePanel: React.FC<ReshapePanelProps> = ({
         }
         const targetPos = userPositions.userPositions[0];
         targetPosPubkey = targetPos.publicKey;
-        targetUpperBinId = targetPos.positionData.upperBinId;
+        targetLowerBinId = targetPos.positionData.lowerBinId;
+        targetPosUpperBinId = targetPos.positionData.upperBinId;
       }
+
+      // Re-resolve the reshape range from the ACTUAL on-chain position bounds —
+      // never from component state, which may still be zeroed while loading.
+      // (buildAtomicReshapeTransactions also validates this range.)
+      const { fromBinId, toBinId } = resolveRange(targetLowerBinId, targetPosUpperBinId);
 
       setStatusMessage("Simulating atomic rebalance on DLMM program...");
       const { initBinArrayTx, rebalanceTx } = await buildAtomicReshapeTransactions(
@@ -133,11 +137,9 @@ export const ReshapePanel: React.FC<ReshapePanelProps> = ({
         publicKey,
         targetPosPubkey,
         {
-          fromBinId: startReshapeBin,
-          toBinId: targetUpperBinId,
+          fromBinId,
+          toBinId,
           distributionType,
-          minWeight,
-          maxWeight,
           maxActiveBinSlippage: 2,
         }
       );
@@ -421,7 +423,7 @@ export const ReshapePanel: React.FC<ReshapePanelProps> = ({
       {/* Action Button */}
       <button
         type="button"
-        disabled={isSubmitting || affectedBinsCount === 0}
+        disabled={isSubmitting || !activePosition || affectedBinsCount === 0}
         onClick={handleExecuteReshape}
         className="w-full bg-gradient-to-r from-emerald-500 to-cyan-500 hover:from-emerald-400 hover:to-cyan-400 text-slate-950 font-bold py-3 px-4 rounded-lg text-sm transition-all shadow-lg shadow-cyan-950/40 disabled:opacity-50 flex items-center justify-center space-x-2"
       >
@@ -431,9 +433,18 @@ export const ReshapePanel: React.FC<ReshapePanelProps> = ({
             <span>Executing Atomic Reshape...</span>
           </>
         ) : (
-          <span>Execute Atomic Reshape ({affectedBinsCount} Bins)</span>
+          <span>
+            {activePosition
+              ? `Execute Atomic Reshape (${affectedBinsCount} Bins)`
+              : "Execute Atomic Reshape"}
+          </span>
         )}
       </button>
+      {!activePosition && connected && (
+        <p className="text-[11px] text-slate-500 text-center">
+          Waiting for your LP position to load before reshaping…
+        </p>
+      )}
     </div>
   );
 };

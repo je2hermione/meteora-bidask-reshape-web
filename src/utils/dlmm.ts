@@ -9,19 +9,25 @@ import { PoolInfo, LPPosition, ReshapeConfig, UserPoolPosition } from "../types"
 import { getBinPrice } from "./math";
 
 // Reliable Solana RPC endpoints
-export const DEFAULT_RPC_ENDPOINTS = [
-  "https://api.mainnet-beta.solana.com",
-];
-
 export const DEFAULT_RPC_ENDPOINT = "https://api.mainnet-beta.solana.com";
 
 // Popular Meteora DLMM pool for default view
 export const DEFAULT_POOL_ADDRESS = "FtiotJckV2ZG4S1YgJDJLiXKKDAnKWXgQxo7vxsjPwPe";
 
 /**
- * Loads metadata from DexScreener to get real token names & symbols
+ * Loads metadata from DexScreener to get real token names & symbols.
+ * Matches base/quote by mint address because DexScreener's base/quote order
+ * does NOT necessarily match DLMM's tokenX/tokenY order.
  */
-async function fetchTokenMetadata(poolAddressStr: string) {
+const tokenMetaCache = new Map<string, { tokenXSymbol: string; tokenYSymbol: string }>();
+
+async function fetchTokenMetadata(
+  poolAddressStr: string,
+  tokenXMint: string,
+  tokenYMint: string
+): Promise<{ tokenXSymbol: string; tokenYSymbol: string } | null> {
+  const cached = tokenMetaCache.get(poolAddressStr);
+  if (cached) return cached;
   try {
     const res = await fetch(`https://api.dexscreener.com/latest/dex/pairs/solana/${poolAddressStr}`, {
       signal: AbortSignal.timeout(3500),
@@ -29,12 +35,19 @@ async function fetchTokenMetadata(poolAddressStr: string) {
     if (res.ok) {
       const data = await res.json();
       const pair = data.pair || (data.pairs && data.pairs[0]);
-      if (pair) {
-        return {
-          baseSymbol: pair.baseToken.symbol,
-          quoteSymbol: pair.quoteToken.symbol,
-          priceUsd: Number(pair.priceUsd || 0),
-        };
+      if (pair?.baseToken?.address && pair?.quoteToken?.address) {
+        const baseAddr: string = pair.baseToken.address;
+        const baseSym: string = pair.baseToken.symbol;
+        const quoteSym: string = pair.quoteToken.symbol;
+        let result: { tokenXSymbol: string; tokenYSymbol: string };
+        if (baseAddr === tokenXMint) {
+          result = { tokenXSymbol: baseSym, tokenYSymbol: quoteSym };
+        } else {
+          // DexScreener base is our Y — swap so symbols align with DLMM tokenX/tokenY
+          result = { tokenXSymbol: quoteSym, tokenYSymbol: baseSym };
+        }
+        tokenMetaCache.set(poolAddressStr, result);
+        return result;
       }
     }
   } catch (e) {
@@ -63,10 +76,14 @@ export async function fetchPoolInfo(
     tokenYDecimals
   );
 
-  const dexMeta = await fetchTokenMetadata(poolAddressStr);
+  const dexMeta = await fetchTokenMetadata(
+    poolAddressStr,
+    pool.tokenX.mint.address.toBase58(),
+    pool.tokenY.mint.address.toBase58()
+  );
 
-  const tokenXSymbol = dexMeta?.baseSymbol || (pool.tokenX.mint.address.toBase58() === "So11111111111111111111111111111111111111112" ? "SOL" : "Token X");
-  const tokenYSymbol = dexMeta?.quoteSymbol || (pool.tokenY.mint.address.toBase58() === "EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v" ? "USDC" : pool.tokenY.mint.address.toBase58() === "So11111111111111111111111111111111111111112" ? "SOL" : "Token Y");
+  const tokenXSymbol = dexMeta?.tokenXSymbol || (pool.tokenX.mint.address.toBase58() === "So11111111111111111111111111111111111111112" ? "SOL" : "Token X");
+  const tokenYSymbol = dexMeta?.tokenYSymbol || (pool.tokenY.mint.address.toBase58() === "EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v" ? "USDC" : pool.tokenY.mint.address.toBase58() === "So11111111111111111111111111111111111111112" ? "SOL" : "Token Y");
 
   // Fetch real on-chain market liquidity distribution around active bin (+- 35 bins)
   let marketBins: { binId: number; price: number; amountX: number; amountY: number }[] = [];
@@ -97,7 +114,6 @@ export async function fetchPoolInfo(
     binStep: pool.lbPair.binStep,
     activeBinId: activeBin.binId,
     currentPrice,
-    feeBps: pool.lbPair.parameters.baseFactor * pool.lbPair.binStep / 100,
     marketBins,
   };
 
@@ -125,6 +141,8 @@ export async function scanAllUserPositions(
     for (const [poolKeyStr, item] of allPositionsMap.entries()) {
       const xMint = item.lbPair.tokenXMint.toBase58();
       const yMint = item.lbPair.tokenYMint.toBase58();
+      const xDecimals = (item as any).tokenX?.mint?.decimals ?? 9;
+      const yDecimals = (item as any).tokenY?.mint?.decimals ?? 9;
       const tokenXSymbol = KNOWN_TOKENS[xMint] || `${xMint.slice(0, 4)}..`;
       const tokenYSymbol = KNOWN_TOKENS[yMint] || (yMint.startsWith("So11") ? "SOL" : `${yMint.slice(0, 4)}..`);
       const pairName = `${tokenXSymbol}/${tokenYSymbol}`;
@@ -138,15 +156,37 @@ export async function scanAllUserPositions(
           tokenYSymbol,
           lowerBinId: posData.positionData.lowerBinId,
           upperBinId: posData.positionData.upperBinId,
-          totalXAmount: Number(posData.positionData.totalXAmount || 0),
-          totalYAmount: Number(posData.positionData.totalYAmount || 0),
+          totalXAmount: rawToUiAmount(posData.positionData.totalXAmount, xDecimals),
+          totalYAmount: rawToUiAmount(posData.positionData.totalYAmount, yDecimals),
         });
       }
     }
     return results;
-  } catch (err) {
+  } catch (err: any) {
     console.error("scanAllUserPositions error:", err);
-    return [];
+    // Don't swallow RPC errors — the caller shows scanError instead of a
+    // misleading "no positions found".
+    throw new Error(err?.message || "Failed to scan wallet positions via RPC.");
+  }
+}
+
+/**
+ * Converts a raw on-chain integer amount string to UI units without the
+ * precision loss of Number(hugeString). Keeps up to 6 fractional digits.
+ */
+function rawToUiAmount(raw: string | number | null | undefined, decimals: number): number {
+  const rawStr = raw?.toString() || "0";
+  try {
+    const r = BigInt(rawStr);
+    if (r === 0n) return 0;
+    const divisor = 10n ** BigInt(Math.max(0, decimals));
+    const intPart = r / divisor;
+    const frac6 = ((r % divisor) * 1_000_000n) / divisor;
+    return Number(intPart) + Number(frac6) / 1e6;
+  } catch {
+    // Fallback for non-integer string forms (e.g. exponent notation)
+    const n = Number(rawStr);
+    return Number.isFinite(n) ? n / Math.pow(10, Math.max(0, decimals)) : 0;
   }
 }
 
@@ -158,7 +198,9 @@ export async function fetchUserPositions(
   userWallet: PublicKey
 ): Promise<LPPosition[]> {
   const { userPositions } = await pool.getPositionsByUserAndLbPair(userWallet);
-  const activeBin = await pool.getActiveBin();
+  // DLMM.create already fetched the pair account — reuse its activeId instead
+  // of an extra getActiveBin() RPC roundtrip.
+  const activeBinId = pool.lbPair.activeId;
   const tokenXDecimals = pool.tokenX.mint.decimals;
   const tokenYDecimals = pool.tokenY.mint.decimals;
 
@@ -173,15 +215,15 @@ export async function fetchUserPositions(
       return {
         binId: b.binId,
         price: bPrice,
-        amountX: Number(b.positionXAmount || 0) / Math.pow(10, tokenXDecimals),
-        amountY: Number(b.positionYAmount || 0) / Math.pow(10, tokenYDecimals),
+        amountX: rawToUiAmount(b.positionXAmount, tokenXDecimals),
+        amountY: rawToUiAmount(b.positionYAmount, tokenYDecimals),
         liquidityShare: (b.positionLiquidity || "0").toString(),
-        isCurrentBin: b.binId === activeBin.binId,
+        isCurrentBin: b.binId === activeBinId,
       };
     });
 
-    const totalXAmount = Number(posData.totalXAmount || 0) / Math.pow(10, tokenXDecimals);
-    const totalYAmount = Number(posData.totalYAmount || 0) / Math.pow(10, tokenYDecimals);
+    const totalXAmount = rawToUiAmount(posData.totalXAmount, tokenXDecimals);
+    const totalYAmount = rawToUiAmount(posData.totalYAmount, tokenYDecimals);
 
     return {
       publicKey: pos.publicKey.toBase58(),
@@ -224,6 +266,20 @@ export async function buildAtomicReshapeTransactions(
 
   const posData = positionInfo.positionData;
   const activeBinId = pool.lbPair.activeId;
+
+  // ---- 0. Guard: a reshape NEVER changes the position's range boundaries.
+  // The reshape sub-range must sit inside [lowerBinId, upperBinId].
+  if (
+    !Number.isInteger(config.fromBinId) ||
+    !Number.isInteger(config.toBinId) ||
+    config.fromBinId < posData.lowerBinId ||
+    config.toBinId > posData.upperBinId ||
+    config.fromBinId > config.toBinId
+  ) {
+    throw new Error(
+      `Invalid reshape range [${config.fromBinId}..${config.toBinId}] — must be within position bounds [${posData.lowerBinId}..${posData.upperBinId}]`
+    );
+  }
 
   // ---- 1. Withdraw 100% of the liquidity in the reshape sub-range ----
   // The reshape operates on the single-sided Token X liquidity above the active

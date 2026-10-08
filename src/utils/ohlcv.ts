@@ -98,6 +98,7 @@ export async function fetchPoolOHLCV(
       low,
       close,
       volume: Math.floor(Math.random() * 50000 + 10000),
+      synthetic: true, // locally generated — NOT real market data
     });
 
     current = close;

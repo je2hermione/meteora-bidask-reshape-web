@@ -50,7 +50,10 @@ export const App: React.FC = () => {
   });
 
   // Effective RPC endpoint for queries (fallback to standard RPC for public view if needed)
-  const activeRpcUrl = rpcEndpoint || "https://api.mainnet-beta.solana.com";
+  const activeRpcUrl =
+    rpcEndpoint ||
+    (import.meta as any).env?.VITE_RPC_URL ||
+    "https://api.mainnet-beta.solana.com";
 
   // Flow State (initialize from ?pair= or ?pool= URL query parameter)
   const [selectedPoolAddress, setSelectedPoolAddress] = useState<string | null>(() => {
@@ -123,8 +126,6 @@ export const App: React.FC = () => {
   const [distributionType, setDistributionType] =
     useState<ReshapeDistributionType>("triangular");
   const [scopeMode, setScopeMode] = useState<ReshapeScopeMode>("full_range");
-  const [minWeight, setMinWeight] = useState<number>(200);
-  const [maxWeight, setMaxWeight] = useState<number>(2000);
 
   // 1. Scan user positions whenever wallet connects
   // Vertical drag resize state for chart vs histogram on desktop
@@ -611,6 +612,7 @@ export const App: React.FC = () => {
                       minBinId={minBinId}
                       maxBinId={maxBinId}
                       tokenYSymbol={poolInfo?.tokenY.symbol || "SOL"}
+                      isSimulated={bars.some((b) => b.synthetic)}
                     />
                   </div>
                 </div>
@@ -645,8 +647,6 @@ export const App: React.FC = () => {
                     userBins={activePosition?.bins}
                     distributionType={distributionType}
                     scopeMode={scopeMode}
-                    minWeight={minWeight}
-                    maxWeight={maxWeight}
                   />
                 </div>
               </div>
@@ -663,10 +663,6 @@ export const App: React.FC = () => {
                     setDistributionType={setDistributionType}
                     scopeMode={scopeMode}
                     setScopeMode={setScopeMode}
-                    minWeight={minWeight}
-                    setMinWeight={setMinWeight}
-                    maxWeight={maxWeight}
-                    setMaxWeight={setMaxWeight}
                     dlmmInstance={dlmmInstance}
                     activePosition={activePosition}
                     onReshapeSuccess={refreshUserPositions}

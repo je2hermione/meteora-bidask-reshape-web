@@ -24,9 +24,13 @@ interface BinHistogramProps {
   userBins?: PositionBin[];
   distributionType: ReshapeDistributionType;
   scopeMode?: ReshapeScopeMode;
-  minWeight: number;
-  maxWeight: number;
 }
+
+// Preview-only weights mirroring the SDK's on-chain BidAsk builder defaults
+// (DEFAULT_MIN_WEIGHT = 200, DEFAULT_MAX_WEIGHT = 2000). The actual on-chain
+// reshape shape is determined by the SDK's strategy builder, not by UI inputs.
+const PREVIEW_MIN_WEIGHT = 200;
+const PREVIEW_MAX_WEIGHT = 2000;
 
 export const BinHistogram: React.FC<BinHistogramProps> = ({
   binStep,
@@ -41,8 +45,6 @@ export const BinHistogram: React.FC<BinHistogramProps> = ({
   userBins = [],
   distributionType,
   scopeMode = "full_range",
-  minWeight,
-  maxWeight,
 }) => {
   const hasUserPosition = Boolean(userBins && userBins.length > 0);
 
@@ -142,12 +144,12 @@ export const BinHistogram: React.FC<BinHistogramProps> = ({
       reshapeStartBin,
       reshapeEndBin,
       distributionType,
-      minWeight,
-      maxWeight,
+      PREVIEW_MIN_WEIGHT,
+      PREVIEW_MAX_WEIGHT,
       slopeMode,
       activeBinId
     );
-  }, [reshapeStartBin, reshapeEndBin, distributionType, minWeight, maxWeight, slopeMode, activeBinId]);
+  }, [reshapeStartBin, reshapeEndBin, distributionType, slopeMode, activeBinId]);
 
   const weightMap = useMemo(() => {
     const map = new Map<number, number>();
@@ -211,6 +213,7 @@ export const BinHistogram: React.FC<BinHistogramProps> = ({
     minBinId,
     maxBinId,
     reshapeStartBin,
+    reshapeEndBin,
     hasUserPosition,
     userMap,
     marketMap,

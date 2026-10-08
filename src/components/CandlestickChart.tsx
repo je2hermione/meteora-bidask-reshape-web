@@ -12,6 +12,8 @@ interface CandlestickChartProps {
   minBinId: number;
   maxBinId: number;
   tokenYSymbol?: string;
+  /** True when bars were synthesized locally (OHLCV APIs unreachable) */
+  isSimulated?: boolean;
 }
 
 export const CandlestickChart: React.FC<CandlestickChartProps> = ({
@@ -23,6 +25,7 @@ export const CandlestickChart: React.FC<CandlestickChartProps> = ({
   minBinId,
   maxBinId,
   tokenYSymbol = "SOL",
+  isSimulated = false,
 }) => {
   const chartContainerRef = useRef<HTMLDivElement>(null);
   const chartRef = useRef<IChartApi | null>(null);
@@ -140,13 +143,18 @@ export const CandlestickChart: React.FC<CandlestickChartProps> = ({
     };
   }, []);
 
-  // 2. Update Bars Data
+  // 2. Update Bars Data (fitContent only on first load — never steal the
+  // user's zoom/pan on auto-refresh)
+  const didInitialFitRef = useRef(false);
   useEffect(() => {
     const series = seriesRef.current;
     if (!series || !bars || bars.length === 0) return;
     try {
       series.setData(bars as any);
-      chartRef.current?.timeScale().fitContent();
+      if (!didInitialFitRef.current) {
+        chartRef.current?.timeScale().fitContent();
+        didInitialFitRef.current = true;
+      }
     } catch (e) {
       console.warn("Error setting chart data:", e);
     }
@@ -232,6 +240,11 @@ export const CandlestickChart: React.FC<CandlestickChartProps> = ({
         <span className="text-emerald-400 font-semibold font-mono">
           Lower {formatPrice(lowerPrice)} {tokenYSymbol} [Bin {minBinId}]
         </span>
+        {isSimulated && (
+          <span className="ml-1 px-1.5 py-0.5 rounded bg-amber-500/15 border border-amber-500/40 text-amber-300 font-semibold">
+            SIMULATED — OHLCV API unreachable
+          </span>
+        )}
       </div>
     </div>
   );

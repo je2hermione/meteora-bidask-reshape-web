@@ -14,8 +14,14 @@ import "@solana/wallet-adapter-react-ui/styles.css";
 import "./index.css";
 
 const Root: React.FC = () => {
-  // Can use custom RPC or default public
-  const endpoint = useMemo(() => DEFAULT_RPC_ENDPOINT, []);
+  // Custom RPC via VITE_RPC_URL (.env), user override in Settings, else default public
+  const endpoint = useMemo(
+    () =>
+      (import.meta as any).env?.VITE_RPC_URL ||
+      localStorage.getItem("meteora_rpc") ||
+      DEFAULT_RPC_ENDPOINT,
+    []
+  );
 
   // Standard wallets (Phantom, Solflare, Backpack, etc.) auto-detected via Wallet Standard
   const wallets = useMemo(() => [], []);

@@ -1,5 +1,5 @@
 import React, { useMemo } from "react";
-import { PositionBin, ReshapeDistributionType, ReshapeScopeMode } from "../types";
+import { OperationMode, PositionBin, ReshapeDistributionType, ReshapeScopeMode } from "../types";
 import {
   calculateDistributionWeights,
   formatPrice,
@@ -24,6 +24,9 @@ interface BinHistogramProps {
   userBins?: PositionBin[];
   distributionType: ReshapeDistributionType;
   scopeMode?: ReshapeScopeMode;
+  operationMode?: OperationMode;
+  targetLowerBinId?: number;
+  targetUpperBinId?: number;
 }
 
 // Preview-only weights mirroring the SDK's on-chain BidAsk builder defaults
@@ -45,23 +48,34 @@ export const BinHistogram: React.FC<BinHistogramProps> = ({
   userBins = [],
   distributionType,
   scopeMode = "full_range",
+  operationMode = "in_place",
+  targetLowerBinId,
+  targetUpperBinId,
 }) => {
   const hasUserPosition = Boolean(userBins && userBins.length > 0);
 
-  // Determine display bounds around current active bin and position
+  // Determine display bounds around current active bin and position (including shifted targets)
   const displayMinBin = useMemo(() => {
-    if (hasUserPosition) {
-      return Math.min(minBinId - 1, activeBinId - 2);
+    let lower = minBinId;
+    if (operationMode === "shift_recenter" && targetLowerBinId !== undefined) {
+      lower = Math.min(lower, targetLowerBinId);
     }
-    return Math.min(minBinId - 4, activeBinId - 16);
-  }, [hasUserPosition, minBinId, activeBinId]);
+    if (hasUserPosition) {
+      return Math.min(lower - 1, activeBinId - 2);
+    }
+    return Math.min(lower - 4, activeBinId - 16);
+  }, [hasUserPosition, minBinId, activeBinId, operationMode, targetLowerBinId]);
 
   const displayMaxBin = useMemo(() => {
-    if (hasUserPosition) {
-      return Math.max(maxBinId + 1, activeBinId + 2);
+    let upper = maxBinId;
+    if (operationMode === "shift_recenter" && targetUpperBinId !== undefined) {
+      upper = Math.max(upper, targetUpperBinId);
     }
-    return Math.max(maxBinId + 4, activeBinId + 24);
-  }, [hasUserPosition, maxBinId, activeBinId]);
+    if (hasUserPosition) {
+      return Math.max(upper + 1, activeBinId + 2);
+    }
+    return Math.max(upper + 4, activeBinId + 24);
+  }, [hasUserPosition, maxBinId, activeBinId, operationMode, targetUpperBinId]);
 
   // Map real market liquidity amounts by binId
   const marketMap = useMemo(() => {
@@ -105,13 +119,22 @@ export const BinHistogram: React.FC<BinHistogramProps> = ({
   // Determine if dominant side is Ask (Token X above active bin) or Bid (Token Y below active bin)
   const isOutOfRangeBelow = activeBinId <= minBinId;
   const isOutOfRangeAbove = activeBinId >= maxBinId;
-  const isAskSideDominant = activeBinId < (minBinId + maxBinId) / 2;
 
   let reshapeStartBin = minBinId;
   let reshapeEndBin = maxBinId;
   let slopeMode: "ascending" | "descending" | "bidask_two_sided" = "ascending";
 
-  if (isOutOfRangeBelow) {
+  if (operationMode === "shift_recenter" && targetLowerBinId !== undefined && targetUpperBinId !== undefined) {
+    reshapeStartBin = targetLowerBinId;
+    reshapeEndBin = targetUpperBinId;
+    if (activeBinId <= targetLowerBinId) {
+      slopeMode = "ascending";
+    } else if (activeBinId >= targetUpperBinId) {
+      slopeMode = "descending";
+    } else {
+      slopeMode = "bidask_two_sided";
+    }
+  } else if (isOutOfRangeBelow) {
     // 100% Token X: Ascending triangle across full range
     reshapeStartBin = minBinId;
     reshapeEndBin = maxBinId;

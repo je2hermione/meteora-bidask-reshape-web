@@ -6,7 +6,7 @@ import { Navbar } from "./components/Navbar";
 import { CandlestickChart } from "./components/CandlestickChart";
 import { BinHistogram } from "./components/BinHistogram";
 import { ReshapePanel } from "./components/ReshapePanel";
-import { PoolInfo, OHLCVBar, LPPosition, ReshapeDistributionType, ReshapeScopeMode, UserPoolPosition } from "./types";
+import { PoolInfo, OHLCVBar, LPPosition, ReshapeDistributionType, ReshapeScopeMode, OperationMode, UserPoolPosition } from "./types";
 import {
   fetchPoolInfo,
   fetchUserPositions,
@@ -126,6 +126,9 @@ export const App: React.FC = () => {
   const [distributionType, setDistributionType] =
     useState<ReshapeDistributionType>("triangular");
   const [scopeMode, setScopeMode] = useState<ReshapeScopeMode>("full_range");
+  const [operationMode, setOperationMode] = useState<OperationMode>("in_place");
+  const [shiftLowerBinId, setShiftLowerBinId] = useState<number>(0);
+  const [shiftUpperBinId, setShiftUpperBinId] = useState<number>(0);
 
   // 1. Scan user positions whenever wallet connects
   // Vertical drag resize state for chart vs histogram on desktop
@@ -230,6 +233,8 @@ export const App: React.FC = () => {
         setActivePosition(matched);
         setMinBinId(matched.lowerBinId);
         setMaxBinId(matched.upperBinId);
+        setShiftLowerBinId((prev) => (prev === 0 ? matched.lowerBinId : prev));
+        setShiftUpperBinId((prev) => (prev === 0 ? matched.upperBinId : prev));
       } else {
         setActivePosition(null);
       }
@@ -291,6 +296,8 @@ export const App: React.FC = () => {
   const handleSelectPosition = (pos: UserPoolPosition) => {
     setSelectedPoolAddress(pos.poolAddress);
     setTargetPositionPubkey(pos.positionPublicKey);
+    setShiftLowerBinId(pos.lowerBinId);
+    setShiftUpperBinId(pos.upperBinId);
   };
 
   const handleManualPoolSubmit = (e: React.FormEvent) => {
@@ -598,7 +605,11 @@ export const App: React.FC = () => {
                       <span className="bg-cyan-950 text-cyan-300 border border-cyan-800 px-1.5 py-0.5 rounded font-mono font-semibold">
                         15m
                       </span>
-                      <span className="text-emerald-400">Boundaries Locked</span>
+                      {operationMode === "in_place" ? (
+                        <span className="text-emerald-400">Boundaries Locked</span>
+                      ) : (
+                        <span className="text-purple-400 font-semibold">Range Shift Mode</span>
+                      )}
                     </div>
                   </div>
 
@@ -613,6 +624,9 @@ export const App: React.FC = () => {
                       maxBinId={maxBinId}
                       tokenYSymbol={poolInfo?.tokenY.symbol || "SOL"}
                       isSimulated={bars.some((b) => b.synthetic)}
+                      operationMode={operationMode}
+                      targetMinBinId={operationMode === "shift_recenter" ? shiftLowerBinId : undefined}
+                      targetMaxBinId={operationMode === "shift_recenter" ? shiftUpperBinId : undefined}
                     />
                   </div>
                 </div>
@@ -647,6 +661,9 @@ export const App: React.FC = () => {
                     userBins={activePosition?.bins}
                     distributionType={distributionType}
                     scopeMode={scopeMode}
+                    operationMode={operationMode}
+                    targetLowerBinId={operationMode === "shift_recenter" ? shiftLowerBinId : undefined}
+                    targetUpperBinId={operationMode === "shift_recenter" ? shiftUpperBinId : undefined}
                   />
                 </div>
               </div>
@@ -663,6 +680,12 @@ export const App: React.FC = () => {
                     setDistributionType={setDistributionType}
                     scopeMode={scopeMode}
                     setScopeMode={setScopeMode}
+                    operationMode={operationMode}
+                    setOperationMode={setOperationMode}
+                    shiftLowerBinId={shiftLowerBinId}
+                    setShiftLowerBinId={setShiftLowerBinId}
+                    shiftUpperBinId={shiftUpperBinId}
+                    setShiftUpperBinId={setShiftUpperBinId}
                     dlmmInstance={dlmmInstance}
                     activePosition={activePosition}
                     onReshapeSuccess={refreshUserPositions}

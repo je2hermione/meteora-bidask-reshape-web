@@ -5,7 +5,7 @@ import DLMM, {
   buildLiquidityStrategyParameters,
 } from "@meteora-ag/dlmm";
 import BN from "bn.js";
-import { PoolInfo, LPPosition, ReshapeConfig, UserPoolPosition } from "../types";
+import { PoolInfo, LPPosition, ReshapeConfig, ShiftRangeConfig, UserPoolPosition } from "../types";
 import { getBinPrice } from "./math";
 
 // Reliable Solana RPC endpoints
@@ -355,6 +355,118 @@ export async function buildAtomicReshapeTransactions(
   );
 
   // ---- 5. Generate transaction instructions ----
+  const { initBinArrayInstructions, rebalancePositionInstruction } =
+    await pool.rebalancePosition(
+      simResponse,
+      new BN(config.maxActiveBinSlippage || 2),
+      userWallet
+    );
+
+  let initBinArrayTx: Transaction | null = null;
+  if (initBinArrayInstructions.length > 0) {
+    initBinArrayTx = new Transaction().add(...initBinArrayInstructions);
+  }
+
+  const rebalanceTx = new Transaction().add(...rebalancePositionInstruction);
+
+  return { initBinArrayTx, rebalanceTx };
+}
+
+/**
+ * Builds range shift / rebalance transaction instructions.
+ *
+ * This mode withdraws 100% of the existing position across [lowerBinId, upperBinId],
+ * and deposits the resulting liquidity (+ accrued fees) into a new target range
+ * [newLowerBinId, newUpperBinId] using Meteora DLMM's native rebalance_liquidity
+ * instruction. The position account is reused directly on-chain without burning or new NFT.
+ */
+export async function buildShiftRangeRebalanceTransactions(
+  pool: DLMM,
+  userWallet: PublicKey,
+  positionPubkey: PublicKey,
+  config: ShiftRangeConfig
+): Promise<{
+  initBinArrayTx: Transaction | null;
+  rebalanceTx: Transaction;
+}> {
+  const { userPositions } = await pool.getPositionsByUserAndLbPair(userWallet);
+  const positionInfo = userPositions.find((p) => p.publicKey.equals(positionPubkey));
+  if (!positionInfo) throw new Error("Target position not found on-chain");
+
+  const posData = positionInfo.positionData;
+  const activeBinId = pool.lbPair.activeId;
+
+  if (
+    !Number.isInteger(config.newLowerBinId) ||
+    !Number.isInteger(config.newUpperBinId) ||
+    config.newLowerBinId > config.newUpperBinId
+  ) {
+    throw new Error(
+      `Invalid target range [${config.newLowerBinId}..${config.newUpperBinId}]`
+    );
+  }
+
+  // 1. Withdraw 100% of the entire position
+  const withdraws = [
+    {
+      minBinId: new BN(posData.lowerBinId),
+      maxBinId: new BN(posData.upperBinId),
+      bps: new BN(10_000), // 100%
+    },
+  ];
+
+  // 2. Sum all available tokens (+ claimable fees) across all bins in the position
+  let amountX = new BN(posData.totalXAmount || 0);
+  let amountY = new BN(posData.totalYAmount || 0);
+  if (posData.feeX) amountX = amountX.add(new BN(posData.feeX));
+  if (posData.feeY) amountY = amountY.add(new BN(posData.feeY));
+
+  // 3. Build deposit struct relative to active bin
+  const strategyType =
+    config.distributionType === "spot"
+      ? StrategyType.Spot
+      : StrategyType.BidAsk;
+
+  const minDeltaId = new BN(config.newLowerBinId - activeBinId);
+  const maxDeltaId = new BN(config.newUpperBinId - activeBinId);
+
+  const isBidSideOnly = maxDeltaId.lt(new BN(0));
+  const favorXInActiveBin = !isBidSideOnly && minDeltaId.lte(new BN(0));
+
+  const strategyParameters = buildLiquidityStrategyParameters(
+    amountX,
+    amountY,
+    minDeltaId,
+    maxDeltaId,
+    new BN(pool.lbPair.binStep),
+    favorXInActiveBin,
+    new BN(activeBinId),
+    getLiquidityStrategyParameterBuilder(strategyType)
+  );
+
+  const deposits = [
+    {
+      minDeltaId,
+      maxDeltaId,
+      x0: strategyParameters.x0,
+      y0: strategyParameters.y0,
+      deltaX: strategyParameters.deltaX,
+      deltaY: strategyParameters.deltaY,
+      favorXInActiveBin,
+    },
+  ];
+
+  // 4. Simulate rebalance
+  const simResponse = await pool.simulateRebalancePosition(
+    positionPubkey,
+    posData,
+    true, // shouldClaimFee
+    true, // shouldClaimReward
+    deposits,
+    withdraws
+  );
+
+  // 5. Generate transaction instructions
   const { initBinArrayInstructions, rebalancePositionInstruction } =
     await pool.rebalancePosition(
       simResponse,

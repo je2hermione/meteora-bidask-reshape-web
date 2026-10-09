@@ -53,6 +53,8 @@ export interface UserPoolPosition {
   totalYAmount: number;
 }
 
+export type OperationMode = "in_place" | "shift_recenter";
+
 export type ReshapeDistributionType = "triangular" | "bidask" | "spot";
 
 export type ReshapeScopeMode = "full_range" | "ask_slice" | "bid_slice";
@@ -60,6 +62,13 @@ export type ReshapeScopeMode = "full_range" | "ask_slice" | "bid_slice";
 export interface ReshapeConfig {
   fromBinId: number;
   toBinId: number;
+  distributionType: ReshapeDistributionType;
+  maxActiveBinSlippage: number;
+}
+
+export interface ShiftRangeConfig {
+  newLowerBinId: number;
+  newUpperBinId: number;
   distributionType: ReshapeDistributionType;
   maxActiveBinSlippage: number;
 }

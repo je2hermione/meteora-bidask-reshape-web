@@ -1,52 +1,65 @@
-# Meteora DLMM LP Reshape Web App - Remediation Plan (v2)
+# Meteora DLMM LP Reshape Web App - Architecture & Execution Plan
 
-## User Feedback & Problem Diagnosis
-1. **Chart Candles & Boundary Lines Mismatch**:
-   - `fetchPoolOHLCV` called GeckoTerminal without `currency=token`, returning prices in **USD** (~$0.00512/token).
-   - In contrast, DLMM pool math (`getBinPrice`) calculates price in native quote tokens (**SOL**, ~0.0000445 SOL/token).
-   - Because the chart candles were in USD while the boundary lines were in SOL (115x difference), the boundary lines appeared completely outside or distorted relative to the candles.
-   - **Fix**: Call GeckoTerminal with `currency=token` so OHLCV is returned in native quote currency (`SOL per Token X`), matching `getBinPrice` exactly.
-   - Update chart axis & badges to format prices in `{symbol}` (`SOL`) with full precision.
+## Objective
+Support two distinct operation modes via an intuitive top-level switch in the web application:
+1. **Mode A: In-Place Reshape (Default & Existing)**: Preserves the position's original `[lowerBinId, upperBinId]` bounds strictly intact. Supports Full Range, Ask Slice, and Bid Slice.
+2. **Mode B: Shift / Recenter Range (New Procedure)**: Enables rolling, shifting, or re-centering the LP position's range using Meteora DLMM's native `rebalance_liquidity` instruction, without burning or creating a new position NFT. Includes interactive bin range sliders, numeric inputs, and a one-click "Recenter on Active Price" button.
 
-2. **Auto-Refresh Rate & Re-render Loop**:
-   - `loadPool` in `App.tsx` had `activePosition` in its dependency array, which triggered repeated cascading reloads whenever position was set.
-   - **Fix**: Decouple `activePosition` from `loadPool` dependencies. Add a controlled, sane interval (45 seconds) for background updates of pool price and user positions without UI stutter.
+---
 
-3. **Preserving Original Position Range Boundaries**:
-   - Reshaping must NOT move, cut, nor extend the original position's range boundary `[lowerBinId, upperBinId]`.
-   - When price is Out Of Range (OOR) below (`activeBinId <= lowerBinId`):
-     - The position holds 100% Token X across all bins.
-     - The reshape slice starts at `lowerBinId` (e.g. -622) and ends at `upperBinId` (e.g. -551).
-     - Reshapes into a full ascending triangle across all `upperBinId - lowerBinId + 1` bins (e.g. 72 bins) with minimum at `lowerBinId` and maximum at `upperBinId`.
-     - No bins are added or cut; total bin size stays identical to the original position.
-   - When price is inside range:
-     - Allow selecting "Full Range" (`[lowerBinId ... upperBinId]`) or "Ask Side" (`[Math.max(lowerBinId, activeBinId + 1) ... upperBinId]`).
-     - Defaults to Full Range when OOR below.
+## Technical Architecture & Safety Analysis
+
+### 1. In-Place Reshape (Mode A)
+- **Status**: Existing mechanism untouched.
+- **Constraints**:
+  - `fromBinId >= posData.lowerBinId` and `toBinId <= posData.upperBinId`.
+  - Withdraws liquidity strictly from the selected sub-range.
+  - Re-deposits via `StrategyType.BidAsk` (ramp) or `StrategyType.Spot` into the exact same bin boundaries.
+
+### 2. Shift / Recenter Range (Mode B)
+- **Mechanism**:
+  - Reuses the existing position account on-chain.
+  - Fully withdraws all liquidity from the old range `[posData.lowerBinId, posData.upperBinId]`.
+  - Re-deposits tokens across the new shifted range `[newLowerBinId, newUpperBinId]`.
+  - Calculates delta IDs relative to current active bin:
+    $$\text{minDeltaId} = \text{newLowerBinId} - \text{activeBinId}$$
+    $$\text{maxDeltaId} = \text{newUpperBinId} - \text{activeBinId}$$
+  - Leverages DLMM's native `rebalance_liquidity` instruction with dynamic resizing:
+    - If the new range is narrower or shifted: `shrinkMode: ShrinkBoth` trims old bins and refunds SOL rent.
+    - If the new range is wider: program reallocs the position account size.
+    - Missing bin arrays are detected and initialized via `initBinArrayInstructions`.
 
 ---
 
 ## Action Plan
 
-### Step 1: Fix OHLCV Currency in `src/utils/ohlcv.ts`
-- Add `currency=token` to GeckoTerminal query to get OHLCV in native quote asset (SOL).
-- Fallback generator also produces prices in native quote asset around `basePrice`.
+### Step 1: Update Types (`src/types/index.ts`)
+- Add `OperationMode = "in_place" | "shift_recenter"`.
+- Add `ShiftRangeConfig` containing `newLowerBinId`, `newUpperBinId`, `distributionType`, and `maxActiveBinSlippage`.
 
-### Step 2: Refine Price Display & Chart Alignment in `CandlestickChart.tsx`
-- Ensure chart price scale, precision (up to 8 decimal places), and boundary lines match native quote price (`SOL`).
-- Display quote asset symbol in price badges.
+### Step 2: Implement Shift Rebalance Builder (`src/utils/dlmm.ts`)
+- Add `buildShiftRangeRebalanceTransactions(pool, userWallet, positionPubkey, config)`:
+  - Validates `newLowerBinId <= newUpperBinId`.
+  - Withdraws 100% of the entire position (`lowerBinId` to `upperBinId`).
+  - Calculates tokens available across all bins (+ fees).
+  - Builds strategy parameters for `[newLowerBinId - activeBinId, newUpperBinId - activeBinId]`.
+  - Executes `pool.simulateRebalancePosition` and `pool.rebalancePosition`.
+  - Returns `initBinArrayTx` and `rebalanceTx`.
 
-### Step 3: Implement Range Boundary Preservation & OOR Handling in `dlmm.ts` & `ReshapePanel.tsx`
-- Compute `startReshapeBin`:
-  - If `activeBinId <= posLowerBin` (OOR below): `fromBinId = posLowerBin` (covers 100% of original bins).
-  - If `activeBinId > posLowerBin`: allow user to select "Full Range" (`posLowerBin` to `posUpperBin`) or "Ask Slice" (`activeBinId + 1` to `posUpperBin`).
-  - Total bin count matches original position range exactly.
-- Build rebalance transaction with the appropriate `minDeltaId` and `maxDeltaId`.
+### Step 3: Implement Mode Switch & Sliders in `src/components/ReshapePanel.tsx`
+- Add Operation Mode Switch tabs: `[ 🔒 In-Place Reshape ]` and `[ ⚡ Shift / Recenter Range ]`.
+- For `In-Place Reshape`: Render existing Scope buttons (Full Range, Ask Slice, Bid Slice) and boundary notices.
+- For `Shift / Recenter Range`:
+  - Show "Recenter on Active Price" one-click button (preserves current position width centered around `activeBinId`).
+  - Add interactive sliders + number inputs for `New Lower Bin` and `New Upper Bin`.
+  - Show live calculated metrics: New Min Price, New Max Price, Total Bins, and active price status (In-Range vs OOR).
+  - Wire execution to `buildShiftRangeRebalanceTransactions`.
 
-### Step 4: Sane Auto-Refresh & Stability in `src/App.tsx`
-- Remove `activePosition` from `loadPool` dependencies.
-- Implement a 45-second background refresh interval for pool and position data.
+### Step 4: Reactive Bin Histogram Preview (`src/components/BinHistogram.tsx` & `src/App.tsx`)
+- Allow `BinHistogram` to display target preview curves when in Shift/Recenter mode, reflecting the new proposed range `[newLowerBinId, newUpperBinId]`.
 
-### Step 5: Build, Deploy & Verify
-- Run `npm run build`.
-- Deploy generated `dist/` bundle to static web hosting.
-- Verify with live script and browser endpoint.
+### Step 5: Build, Test & Deploy
+- Run TypeScript check and `npm run build`.
+- Deploy generated assets to web hosting directory.
+- Test live web endpoint via HTTP check.
+- Sanitize any repository updates and commit.

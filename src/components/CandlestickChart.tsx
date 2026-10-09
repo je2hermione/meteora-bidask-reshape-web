@@ -1,6 +1,6 @@
 import React, { useEffect, useRef, useState } from "react";
 import { createChart, IChartApi, ISeriesApi } from "lightweight-charts";
-import { OHLCVBar } from "../types";
+import { OHLCVBar, OperationMode } from "../types";
 import { formatPrice, getBinPrice } from "../utils/math";
 
 interface CandlestickChartProps {
@@ -14,6 +14,9 @@ interface CandlestickChartProps {
   tokenYSymbol?: string;
   /** True when bars were synthesized locally (OHLCV APIs unreachable) */
   isSimulated?: boolean;
+  operationMode?: OperationMode;
+  targetMinBinId?: number;
+  targetMaxBinId?: number;
 }
 
 export const CandlestickChart: React.FC<CandlestickChartProps> = ({
@@ -26,6 +29,9 @@ export const CandlestickChart: React.FC<CandlestickChartProps> = ({
   maxBinId,
   tokenYSymbol = "SOL",
   isSimulated = false,
+  operationMode = "in_place",
+  targetMinBinId,
+  targetMaxBinId,
 }) => {
   const chartContainerRef = useRef<HTMLDivElement>(null);
   const chartRef = useRef<IChartApi | null>(null);
@@ -39,10 +45,19 @@ export const CandlestickChart: React.FC<CandlestickChartProps> = ({
   const upperLineRef = useRef<any>(null);
   const lowerLineRef = useRef<any>(null);
   const activeLineRef = useRef<any>(null);
+  const targetUpperLineRef = useRef<any>(null);
+  const targetLowerLineRef = useRef<any>(null);
 
   const upperPrice = getBinPrice(maxBinId, binStep, decimalsX, decimalsY);
   const lowerPrice = getBinPrice(minBinId, binStep, decimalsX, decimalsY);
   const activePrice = getBinPrice(activeBinId, binStep, decimalsX, decimalsY);
+
+  const targetUpperPrice = targetMaxBinId !== undefined
+    ? getBinPrice(targetMaxBinId, binStep, decimalsX, decimalsY)
+    : undefined;
+  const targetLowerPrice = targetMinBinId !== undefined
+    ? getBinPrice(targetMinBinId, binStep, decimalsX, decimalsY)
+    : undefined;
 
   // 1. Initialize Chart
   useEffect(() => {
@@ -177,11 +192,15 @@ export const CandlestickChart: React.FC<CandlestickChartProps> = ({
     safeRemove(upperLineRef.current);
     safeRemove(lowerLineRef.current);
     safeRemove(activeLineRef.current);
+    safeRemove(targetUpperLineRef.current);
+    safeRemove(targetLowerLineRef.current);
     upperLineRef.current = null;
     lowerLineRef.current = null;
     activeLineRef.current = null;
+    targetUpperLineRef.current = null;
+    targetLowerLineRef.current = null;
 
-    const isValid = (p: number) =>
+    const isValid = (p: number | undefined): p is number =>
       typeof p === "number" && !isNaN(p) && isFinite(p) && p > 0;
 
     try {
@@ -220,19 +239,55 @@ export const CandlestickChart: React.FC<CandlestickChartProps> = ({
           title: `LOWER BOUNDARY [${minBinId}]`,
         });
       }
+
+      // Shift/Recenter Target Upper Line (Dashed Purple)
+      if (operationMode === "shift_recenter" && isValid(targetUpperPrice)) {
+        targetUpperLineRef.current = series.createPriceLine({
+          price: targetUpperPrice,
+          color: "#c084fc",
+          lineWidth: 2,
+          lineStyle: 2, // Dashed
+          axisLabelVisible: true,
+          title: `NEW UPPER [${targetMaxBinId}]`,
+        });
+      }
+
+      // Shift/Recenter Target Lower Line (Dashed Purple)
+      if (operationMode === "shift_recenter" && isValid(targetLowerPrice)) {
+        targetLowerLineRef.current = series.createPriceLine({
+          price: targetLowerPrice,
+          color: "#a855f7",
+          lineWidth: 2,
+          lineStyle: 2, // Dashed
+          axisLabelVisible: true,
+          title: `NEW LOWER [${targetMinBinId}]`,
+        });
+      }
     } catch (e) {
       console.warn("Error rendering boundary price lines:", e);
     }
-  }, [upperPrice, lowerPrice, activePrice, minBinId, maxBinId, readyVersion]);
+  }, [
+    upperPrice,
+    lowerPrice,
+    activePrice,
+    minBinId,
+    maxBinId,
+    readyVersion,
+    operationMode,
+    targetUpperPrice,
+    targetLowerPrice,
+    targetMaxBinId,
+    targetMinBinId,
+  ]);
 
   return (
     <div className="relative w-full h-full select-none">
       <div ref={chartContainerRef} className="w-full h-full cursor-crosshair" />
 
       {/* Range Boundary Display Badge */}
-      <div className="absolute top-3 left-4 flex items-center space-x-2 bg-slate-900/90 backdrop-blur border border-slate-800 rounded-md px-3 py-1.5 text-xs z-10">
+      <div className="absolute top-3 left-4 flex flex-wrap items-center gap-2 bg-slate-900/90 backdrop-blur border border-slate-800 rounded-md px-3 py-1.5 text-xs z-10">
         <span className="w-2 h-2 rounded-full bg-cyan-400"></span>
-        <span className="text-slate-400 font-mono">Boundaries:</span>
+        <span className="text-slate-400 font-mono">Current:</span>
         <span className="text-rose-400 font-semibold font-mono">
           Upper {formatPrice(upperPrice)} {tokenYSymbol} [Bin {maxBinId}]
         </span>
@@ -240,6 +295,18 @@ export const CandlestickChart: React.FC<CandlestickChartProps> = ({
         <span className="text-emerald-400 font-semibold font-mono">
           Lower {formatPrice(lowerPrice)} {tokenYSymbol} [Bin {minBinId}]
         </span>
+
+        {operationMode === "shift_recenter" && targetUpperPrice !== undefined && targetLowerPrice !== undefined && (
+          <>
+            <span className="text-slate-500">||</span>
+            <span className="text-purple-300 font-semibold font-mono flex items-center space-x-1">
+              <span>Target Shift:</span>
+              <span className="text-purple-400">
+                [{targetMinBinId} → {targetMaxBinId}]
+              </span>
+            </span>
+          </>
+        )}
         {isSimulated && (
           <span className="ml-1 px-1.5 py-0.5 rounded bg-amber-500/15 border border-amber-500/40 text-amber-300 font-semibold">
             SIMULATED — OHLCV API unreachable
